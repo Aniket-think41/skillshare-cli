@@ -33,13 +33,29 @@ jobs:
           pip install pyinstaller
           pip install -e .
 
+      # Build from the top-level run.py shim (NOT skillshare_cli/main.py) so the
+      # whole package is bundled and relative imports resolve. --collect-submodules
+      # is cheap insurance that nothing in the package is missed; --hidden-import
+      # tkinter keeps the GUI commands (panel/watch) working under --onefile.
       - name: Build with PyInstaller
         run: |
-          pyinstaller --onefile --name skillshare skillshare_cli/main.py
+          pyinstaller --onefile --name skillshare \
+            --collect-submodules skillshare_cli \
+            --hidden-import tkinter \
+            run.py
           if [ "${{ matrix.target }}" = "windows-amd64" ]; then
             mv dist/skillshare.exe dist/skillshare-windows-amd64.exe
           else
             mv dist/skillshare dist/skillshare-${{ matrix.target }}
+          fi
+        shell: bash
+
+      - name: Smoke-test the binary
+        run: |
+          if [ "${{ matrix.target }}" = "windows-amd64" ]; then
+            ./dist/skillshare-windows-amd64.exe --help
+          else
+            ./dist/skillshare-${{ matrix.target }} --help
           fi
         shell: bash
 

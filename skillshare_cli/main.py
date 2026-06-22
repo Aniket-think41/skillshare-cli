@@ -307,6 +307,21 @@ def cmd_get(args) -> None:
         print(section)
 
 
+def cmd_use(args) -> None:
+    """Print a resource's raw content — no decorations, nothing written to disk —
+    so it can be piped straight into an agent (e.g. `skillshare use <id> | claude`).
+    Skills/notes emit their markdown body; MCP servers emit their config JSON."""
+    path = f"/api/resources/{args.id}" if token() else f"/api/public/resources/{args.id}"
+    r = request("GET", path, auth=bool(token()))
+    if r["type"] == "MCP":
+        sys.stdout.write(r.get("config_json") or "{}")
+    else:
+        body = r.get("content_md") or ""
+        section = attachments_md(r)
+        sys.stdout.write(body + (section or ""))
+    sys.stdout.write("\n")
+
+
 def cmd_pull(args) -> None:
     path = f"/api/resources/{args.id}" if token() else f"/api/public/resources/{args.id}"
     r = request("GET", path, auth=bool(token()))
@@ -1060,6 +1075,10 @@ def main() -> None:
     sp = sub.add_parser("get", help="show a resource's full content")
     sp.add_argument("id")
     sp.set_defaults(fn=cmd_get)
+
+    sp = sub.add_parser("use", help="print a skill/note's raw content for piping into an agent (no local install)")
+    sp.add_argument("id")
+    sp.set_defaults(fn=cmd_use)
 
     sp = sub.add_parser("pull", help="save a resource locally (SKILL.md / mcp-config.json / note.md + attachments)")
     sp.add_argument("id")
