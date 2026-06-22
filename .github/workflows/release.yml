@@ -41,6 +41,7 @@ jobs:
         run: |
           pyinstaller --onefile --name skillshare \
             --collect-submodules skillshare_cli \
+            --collect-submodules truststore \
             --hidden-import tkinter \
             run.py
           if [ "${{ matrix.target }}" = "windows-amd64" ]; then

@@ -21,6 +21,30 @@ from pathlib import Path
 
 import httpx
 
+
+def _enable_system_trust() -> None:
+    """Make Python's TLS trust the OS certificate store (Windows/macOS/Linux),
+    not just certifi's bundle. Without this, the CLI/MCP fail behind corporate
+    TLS-inspection proxies (Zscaler, Netskope, …) that re-sign HTTPS with a root
+    CA the OS trusts but certifi doesn't — `curl` works, Python doesn't. Runs at
+    import so every httpx call (CLI and MCP both go through this module) is
+    covered. No-op if `truststore` isn't installed or injection fails, so it
+    never makes connectivity worse than the certifi default.
+
+    Override with SKILLSHARE_SYSTEM_TRUST=0 to force the certifi default.
+    """
+    if os.environ.get("SKILLSHARE_SYSTEM_TRUST", "1") == "0":
+        return
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+    except Exception:
+        pass
+
+
+_enable_system_trust()
+
 CONFIG_DIR = Path(os.environ.get("SKILLSHARE_CONFIG_DIR", "~/.config/skillshare")).expanduser()
 CREDS_FILE = CONFIG_DIR / "credentials.json"
 DEFAULT_API = "https://skillshare-backend-1081098542602.us-central1.run.app"

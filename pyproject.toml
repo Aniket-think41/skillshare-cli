@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skillshare-cli"
-version = "1.0.1"
+version = "1.0.2"
 description = "Command-line client for the SkillShare registry"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,6 +23,10 @@ classifiers = [
 keywords = ["skills", "mcp", "registry", "ai", "claude"]
 dependencies = [
     "httpx>=0.27",
+    # Use the OS trust store for TLS so the CLI/MCP work behind corporate
+    # TLS-inspection proxies (Zscaler, Netskope, …) whose root CA the OS trusts
+    # but certifi doesn't. Injected at import in authflow.py.
+    "truststore>=0.9",
 ]
 
 [project.urls]
