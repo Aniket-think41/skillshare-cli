@@ -216,11 +216,127 @@ def cmd_whoami(_args) -> None:
     u = request("GET", "/api/auth/me")
     print(f"{BOLD}{u['display_name']}{RESET} (@{u['username']}) — {u['email']}")
     print(f"{DIM}publisher: {'yes' if u['is_publisher'] else 'no'} · api: {api_url()}{RESET}")
+    # Surface the inbox so you notice when teammates add skills/notes/MCP.
+    try:
+        cnt = (request("GET", "/api/notifications/unread_count") or {}).get("count", 0)
+    except SystemExit:
+        cnt = 0
+    if cnt:
+        print(f"{BOLD}● {cnt} unread{RESET} in your inbox — run {BOLD}skillshare inbox{RESET}")
+
+
+def _org_labels(o: dict) -> str:
+    """A ' · Team/Squad' suffix when an org has renamed Projects/Pods."""
+    term = o.get("terminology") or {}
+    if term.get("project") or term.get("pod"):
+        return f" · {term.get('project', 'Project')}/{term.get('pod', 'Pod')}"
+    return ""
 
 
 def cmd_orgs(_args) -> None:
     for o in request("GET", "/api/orgs"):
-        print(f"{BOLD}{o['name']}{RESET}  {DIM}{o['slug']} · {o['my_role']} · {o['plan']}{RESET}")
+        print(f"{BOLD}{o['name']}{RESET}  {DIM}{o['slug']} · {o['my_role']} · {o['plan']}{_org_labels(o)}{RESET}")
+
+
+def cmd_org_set(args) -> None:
+    """Rename an org (name/description) or relabel its Projects/Pods — the
+    'workspace naming' an org can customize. Relabelling is a premium feature."""
+    body: dict = {}
+    if args.name:
+        body["name"] = args.name
+    if args.description is not None:
+        body["description"] = args.description
+    if args.project_label or args.pod_label:
+        # Terminology needs both labels; keep the ones we aren't changing.
+        current = (request("GET", f"/api/orgs/{args.org}") or {}).get("terminology") or {}
+        body["terminology"] = {
+            "project": args.project_label or current.get("project") or "Project",
+            "pod": args.pod_label or current.get("pod") or "Pod",
+        }
+    if not body:
+        die("nothing to update — pass --name / --description / --project-label / --pod-label")
+    o = request("PATCH", f"/api/orgs/{args.org}", body=body)
+    print(f"updated {BOLD}{o['name']}{RESET} {DIM}({o['slug']}){RESET}")
+    term = o.get("terminology") or {}
+    if term:
+        print(f"  labels: Project→{BOLD}{term.get('project')}{RESET} · Pod→{BOLD}{term.get('pod')}{RESET}")
+
+
+# ---- member management (org / project / pod) ----
+# One scope per invocation, selected by exactly one of --org / --project / --pod.
+# Roles everywhere are ADMIN | MEMBER. Adding by email auto-provisions a brand-new
+# teammate (they get emailed a temp password); adding deeper cascades the shallower
+# levels as MEMBER (a pod ADMIN is still an org/project MEMBER).
+
+
+def _scope_target(args) -> tuple[str, str, str]:
+    """Resolve the (kind, path, label) for the chosen scope flag. Exactly one of
+    --org/--project/--pod must be given."""
+    chosen = [(k, v) for k, v in (("org", args.org), ("project", args.project), ("pod", args.pod)) if v]
+    if len(chosen) != 1:
+        die("choose exactly one scope: --org <slug>, --project <id>, or --pod <id>")
+    kind, value = chosen[0]
+    if kind == "org":
+        return "org", f"/api/orgs/{value}/members", f"org {value}"
+    return kind, f"/api/{kind}s/{value}/members", f"{kind} {value}"
+
+
+def _norm_role(role: str | None, *, default: str = "MEMBER") -> str:
+    r = (role or default).strip().upper()
+    return "ADMIN" if r in ("ADMIN", "OWNER", "LEAD") else "MEMBER"
+
+
+def _resolve_user_id(path: str, who: str) -> str:
+    """Map an email or @username to a user_id using the scope's member list."""
+    if who.startswith("u-"):
+        return who
+    needle = who.lstrip("@").lower()
+    for m in request("GET", path) or []:
+        u = m.get("user") or {}
+        if u.get("email", "").lower() == needle or u.get("username", "").lower() == needle:
+            return m["user_id"]
+    die(f"no member matching '{who}' in this scope")
+
+
+def cmd_members(args) -> None:
+    _, path, label = _scope_target(args)
+    rows = request("GET", path) or []
+    print(f"{BOLD}{len(rows)}{RESET} member(s) in {label}")
+    for m in rows:
+        u = m.get("user") or {}
+        print(f"  {m['role']:<7} {BOLD}{u.get('display_name', '?')}{RESET} "
+              f"{DIM}@{u.get('username', '?')} · {u.get('email', '')}{RESET}")
+
+
+def cmd_add_member(args) -> None:
+    kind, path, label = _scope_target(args)
+    role = _norm_role(args.role, default="ADMIN" if args.admin else "MEMBER")
+    if kind == "org":
+        # Org onboarding goes through the invite flow (emails an accept link).
+        inv = request("POST", path.replace("/members", "/invite"),
+                      body={"email": args.email, "role": role})
+        print(f"invited {BOLD}{inv['email']}{RESET} to {label} as {role}")
+        return
+    m = request("POST", path, body={"email": args.email, "role": role})
+    u = m.get("user") or {}
+    print(f"added {BOLD}{u.get('email', args.email)}{RESET} to {label} as {m['role']}")
+    if kind == "pod":
+        print(f"{DIM}(also added as MEMBER of the parent project and org){RESET}")
+
+
+def cmd_set_role(args) -> None:
+    kind, path, label = _scope_target(args)
+    role = _norm_role(args.role)
+    uid = _resolve_user_id(path, args.who)
+    m = request("PATCH", f"{path}/{uid}", body={"role": role})
+    print(f"{BOLD}{args.who}{RESET} is now {m['role']} in {label}")
+
+
+def cmd_remove_member(args) -> None:
+    _, path, label = _scope_target(args)
+    uid = _resolve_user_id(path, args.who)
+    request("DELETE", f"{path}/{uid}")
+    print(f"removed {BOLD}{args.who}{RESET} from {label}")
 
 
 def cmd_tokens(_args) -> None:
@@ -403,22 +519,33 @@ def cmd_list(args) -> None:
     if args.pod:
         params["scope"] = args.scope
         rows = request("GET", f"/api/pods/{args.pod}/resources", params=params)
+    elif getattr(args, "project", None):
+        rows = request("GET", f"/api/projects/{args.project}/resources", params=params)
     elif args.org:
         rows = request("GET", f"/api/orgs/{args.org}/resources", params=params)
     else:
-        die("provide --org <slug> or --pod <id>")
+        die("provide --org <slug>, --project <id>, or --pod <id>")
     print_resources(rows)
+
+
+def _resolve_scope(args) -> dict:
+    """Map --org/--project/--pod to a resource scope (exactly one required).
+    A resource added at a level is inherited by everything beneath it and
+    notifies that level's members: pod → pod members, project → project
+    members, org → the whole org."""
+    if getattr(args, "pod", None):
+        return {"scope_type": "POD", "scope_id": args.pod}
+    if getattr(args, "project", None):
+        return {"scope_type": "PROJECT", "scope_id": args.project}
+    if getattr(args, "org", None):
+        org = request("GET", f"/api/orgs/{args.org}")
+        return {"scope_type": "ORG", "scope_id": org["id"]}
+    die("provide a target scope: --org <slug>, --project <id>, or --pod <id>")
 
 
 def cmd_add_note(args) -> None:
     content = Path(args.file).read_text() if args.file else sys.stdin.read()
-    if args.pod:
-        scope = {"scope_type": "POD", "scope_id": args.pod}
-    elif args.org:
-        org = request("GET", f"/api/orgs/{args.org}")
-        scope = {"scope_type": "ORG", "scope_id": org["id"]}
-    else:
-        die("provide --org <slug> or --pod <id>")
+    scope = _resolve_scope(args)
     # --link is always a URL; --image/--video/--attach accept a local file
     # (uploaded automatically) OR a URL.
     attachments = (
@@ -616,16 +743,11 @@ def cmd_scan(args) -> None:
         print(f"    {DIM}{c.path}{RESET}")
     n_new = sum(1 for r in rows if r["status"] == "new")
     if n_new:
-        print(f"\n{n_new} new — push with {BOLD}skillshare push --org <slug>{RESET} (or --pod <id>)")
+        print(f"\n{n_new} new — push with {BOLD}skillshare push --org <slug>{RESET} (or --project <id> / --pod <id>)")
 
 
 def _resolve_push_scope(args) -> dict:
-    if args.pod:
-        return {"scope_type": "POD", "scope_id": args.pod}
-    if args.org:
-        org = request("GET", f"/api/orgs/{args.org}")
-        return {"scope_type": "ORG", "scope_id": org["id"]}
-    die("provide --org <slug> or --pod <id> as the push target")
+    return _resolve_scope(args)
 
 
 def cmd_push(args) -> None:
@@ -646,7 +768,8 @@ def cmd_push(args) -> None:
         if findings:
             print(f"  {BOLD}⚠ {len(findings)} secret(s) redacted before upload:{RESET} {DIM}{', '.join(findings)}{RESET}")
         if not args.yes:
-            ans = input(f"  push to {scope['scope_type'].lower()} {args.org or args.pod}? [y/N/d=dismiss] ").strip().lower()
+            target = args.org or getattr(args, "project", None) or args.pod
+            ans = input(f"  push to {scope['scope_type'].lower()} {target}? [y/N/d=dismiss] ").strip().lower()
             if ans == "d":
                 request("POST", "/api/local-state", body={
                     "fingerprint": r["fingerprint"], "kind": c.kind, "status": "dismissed",
@@ -685,7 +808,7 @@ def cmd_github(args) -> None:
             print(f"    {d['description'][:100]}")
     if args.dry_run:
         print(f"\n{len(detected)} detected — import with "
-              f"{BOLD}skillshare github <url> --org <slug>{RESET} (or --pod <id>)")
+              f"{BOLD}skillshare github <url> --org <slug>{RESET} (or --project <id> / --pod <id>)")
         return
 
     scope = _resolve_push_scope(args)
@@ -1065,6 +1188,41 @@ def main() -> None:
     sub.add_parser("orgs", help="list my organizations").set_defaults(fn=cmd_orgs)
     sub.add_parser("tokens", help="list my personal access tokens").set_defaults(fn=cmd_tokens)
 
+    sp = sub.add_parser("org-set", help="rename an org or relabel its Projects/Pods (workspace naming)")
+    sp.add_argument("org", help="org slug")
+    sp.add_argument("--name", help="new org name")
+    sp.add_argument("--description", help="new org description")
+    sp.add_argument("--project-label", dest="project_label", help="rename 'Project' (e.g. Team) — premium")
+    sp.add_argument("--pod-label", dest="pod_label", help="rename 'Pod' (e.g. Squad) — premium")
+    sp.set_defaults(fn=cmd_org_set)
+
+    def _scope_flags(parser):
+        parser.add_argument("--org", help="org slug")
+        parser.add_argument("--project", help="project id")
+        parser.add_argument("--pod", help="pod id")
+
+    sp = sub.add_parser("members", help="list members of an org, project, or pod")
+    _scope_flags(sp)
+    sp.set_defaults(fn=cmd_members)
+
+    sp = sub.add_parser("add-member", help="add someone by email to an org/project/pod (auto-provisions new users)")
+    sp.add_argument("email", help="the teammate's email address")
+    _scope_flags(sp)
+    sp.add_argument("--role", choices=["admin", "member", "ADMIN", "MEMBER"], help="role at this scope (default member)")
+    sp.add_argument("--admin", action="store_true", help="shorthand for --role admin")
+    sp.set_defaults(fn=cmd_add_member)
+
+    sp = sub.add_parser("set-role", help="change a member's role (admin|member) at a scope")
+    sp.add_argument("who", help="email, @username, or user id of the member")
+    _scope_flags(sp)
+    sp.add_argument("--role", required=True, choices=["admin", "member", "ADMIN", "MEMBER"])
+    sp.set_defaults(fn=cmd_set_role)
+
+    sp = sub.add_parser("remove-member", help="remove a member from a project or pod (or an org)")
+    sp.add_argument("who", help="email, @username, or user id of the member")
+    _scope_flags(sp)
+    sp.set_defaults(fn=cmd_remove_member)
+
     sp = sub.add_parser("search", help="search the public marketplace")
     sp.add_argument("query", nargs="?", default="")
     sp.add_argument("--type", choices=["skill", "mcp", "note", "SKILL", "MCP", "NOTE"])
@@ -1091,8 +1249,9 @@ def main() -> None:
     sp.add_argument("--kind", default="file", choices=["image", "video", "file"])
     sp.set_defaults(fn=cmd_upload)
 
-    sp = sub.add_parser("list", help="list org or pod resources (incl. inherited)")
+    sp = sub.add_parser("list", help="list org, project, or pod resources (incl. inherited)")
     sp.add_argument("--org", help="org slug")
+    sp.add_argument("--project", help="project id")
     sp.add_argument("--pod", help="pod id")
     sp.add_argument("--scope", default="all", choices=["all", "pod", "project", "org"])
     sp.add_argument("--type", choices=["skill", "mcp", "note", "SKILL", "MCP", "NOTE"])
@@ -1103,6 +1262,7 @@ def main() -> None:
     sp = add.add_parser("note", help="create a NOTE from a file or stdin")
     sp.add_argument("--title", required=True)
     sp.add_argument("--org", help="org slug (org-level note)")
+    sp.add_argument("--project", help="project id (project-level note)")
     sp.add_argument("--pod", help="pod id (pod-level note)")
     sp.add_argument("-f", "--file", help="markdown file (default: read stdin)")
     sp.add_argument("--description")
@@ -1133,6 +1293,7 @@ def main() -> None:
     sp = sub.add_parser("push", help="push local artifacts to the platform (secrets redacted, with preview)")
     _scan_flags(sp)
     sp.add_argument("--org", help="target org slug")
+    sp.add_argument("--project", help="target project id")
     sp.add_argument("--pod", help="target pod id")
     sp.add_argument("--fingerprint", help="push only the candidate with this fingerprint (prefix ok)")
     sp.add_argument("--yes", action="store_true", help="don't prompt for confirmation")
@@ -1141,6 +1302,7 @@ def main() -> None:
     sp = sub.add_parser("github", help="import skills/MCP/notes from a public GitHub repo URL")
     sp.add_argument("url", help="github.com/owner/repo (optionally /tree/<ref>/<subpath>)")
     sp.add_argument("--org", help="target org slug")
+    sp.add_argument("--project", help="target project id")
     sp.add_argument("--pod", help="target pod id")
     sp.add_argument("--dry-run", action="store_true", help="just show what was detected; import nothing")
     sp.add_argument("--yes", action="store_true", help="import everything detected without prompting")
