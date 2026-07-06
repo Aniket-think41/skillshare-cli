@@ -153,9 +153,12 @@ def print_resources(rows: list[dict]) -> None:
         scope = r.get("scope_label") or r["scope_type"]
         author = (r.get("author") or {}).get("username", "?")
         pub = " 🌐" if r.get("is_public") else ""
+        vis = r.get("visibility")
+        # Only surface audience when it's wider than the home scope (shared up).
+        vis_note = f" · 👁 {vis.lower()}" if vis and not r.get("is_public") and vis != scope else ""
         print(
             f"{GLYPH.get(r['type'], '·')} {BOLD}{r['title']}{RESET} {DIM}v{r['version']}{RESET}"
-            f"  [{r['id']}]  {DIM}{scope.lower()} · @{author} · ★{r['stars_count']}{pub}{RESET}"
+            f"  [{r['id']}]  {DIM}{scope.lower()} · @{author} · ★{r['stars_count']}{vis_note}{pub}{RESET}"
         )
         if r.get("description"):
             print(f"    {r['description'][:100]}")
@@ -543,6 +546,14 @@ def _resolve_scope(args) -> dict:
     die("provide a target scope: --org <slug>, --project <id>, or --pod <id>")
 
 
+def _visibility_arg(args) -> dict:
+    """Optional {visibility: POD|PROJECT|ORG} — the audience for a new resource.
+    Omitted → backend defaults to the home scope (e.g. pod resources are
+    pod-only). Widen it so other pods / the whole org can see it."""
+    v = getattr(args, "visibility", None)
+    return {"visibility": v.upper()} if v else {}
+
+
 def cmd_add_note(args) -> None:
     content = Path(args.file).read_text() if args.file else sys.stdin.read()
     scope = _resolve_scope(args)
@@ -565,10 +576,22 @@ def cmd_add_note(args) -> None:
             "tags": [t.strip() for t in (args.tags or "").split(",") if t.strip()],
             "attachments": attachments,
             **scope,
+            **_visibility_arg(args),
         },
     )
     extra = f" with {len(attachments)} attachment(s)" if attachments else ""
-    print(f"created {BOLD}{r['title']}{RESET} [{r['id']}] in {r['scope_type'].lower()} scope{extra}")
+    vis = r.get("visibility", "")
+    print(f"created {BOLD}{r['title']}{RESET} [{r['id']}] in {r['scope_type'].lower()} scope"
+          f"{f' · visible to {vis.lower()}' if vis else ''}{extra}")
+
+
+def cmd_move(args) -> None:
+    """Move a resource to another pod/project/org (and optionally set its audience)."""
+    scope = _resolve_scope(args)
+    body = {**scope, **_visibility_arg(args)}
+    r = request("POST", f"/api/resources/{args.id}/move", body=body)
+    print(f"moved {BOLD}{r['title']}{RESET} → {r['scope_type'].lower()} "
+          f"{DIM}(visible to {r.get('visibility', '?').lower()}){RESET}")
 
 
 def cmd_upload(args) -> None:
@@ -779,7 +802,7 @@ def cmd_push(args) -> None:
             if ans != "y":
                 print(f"  {DIM}skipped (will ask again next scan){RESET}")
                 continue
-        created = request("POST", "/api/resources", body={**payload, **scope})
+        created = request("POST", "/api/resources", body={**payload, **scope, **_visibility_arg(args)})
         request("POST", "/api/local-state", body={
             "fingerprint": r["fingerprint"], "kind": c.kind, "status": "pushed",
             "source": c.source, "resource_id": created["id"], "name": c.name})
@@ -1264,6 +1287,8 @@ def main() -> None:
     sp.add_argument("--org", help="org slug (org-level note)")
     sp.add_argument("--project", help="project id (project-level note)")
     sp.add_argument("--pod", help="pod id (pod-level note)")
+    sp.add_argument("--visibility", choices=["pod", "project", "org", "POD", "PROJECT", "ORG"],
+                    help="who can see it (default: the home scope — e.g. pod-only for a pod note)")
     sp.add_argument("-f", "--file", help="markdown file (default: read stdin)")
     sp.add_argument("--description")
     sp.add_argument("--tags", help="comma-separated")
@@ -1295,9 +1320,20 @@ def main() -> None:
     sp.add_argument("--org", help="target org slug")
     sp.add_argument("--project", help="target project id")
     sp.add_argument("--pod", help="target pod id")
+    sp.add_argument("--visibility", choices=["pod", "project", "org", "POD", "PROJECT", "ORG"],
+                    help="who can see the pushed resource (default: the home scope)")
     sp.add_argument("--fingerprint", help="push only the candidate with this fingerprint (prefix ok)")
     sp.add_argument("--yes", action="store_true", help="don't prompt for confirmation")
     sp.set_defaults(fn=cmd_push)
+
+    sp = sub.add_parser("move", help="move a resource to another pod/project/org (optionally set audience)")
+    sp.add_argument("id", help="resource id to move")
+    sp.add_argument("--org", help="destination org slug")
+    sp.add_argument("--project", help="destination project id")
+    sp.add_argument("--pod", help="destination pod id")
+    sp.add_argument("--visibility", choices=["pod", "project", "org", "POD", "PROJECT", "ORG"],
+                    help="audience at the destination (default: the destination scope)")
+    sp.set_defaults(fn=cmd_move)
 
     sp = sub.add_parser("github", help="import skills/MCP/notes from a public GitHub repo URL")
     sp.add_argument("url", help="github.com/owner/repo (optionally /tree/<ref>/<subpath>)")
