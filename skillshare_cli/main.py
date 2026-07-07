@@ -84,7 +84,9 @@ def die(msg: str, code: int = 1) -> None:
 
 
 def request(method: str, path: str, *, body: dict | None = None, params: dict | None = None, auth: bool = True):
-    headers = {}
+    # Tell the API this call came from the CLI so it attributes activity to the
+    # right client (spec §7).
+    headers = {"X-SkillShare-Client": "cli"}
     if auth:
         t = token()
         if not t:
@@ -103,6 +105,22 @@ def request(method: str, path: str, *, body: dict | None = None, params: dict | 
         except (KeyError, ValueError):
             die(f"HTTP {res.status_code}: {res.text[:200]}")
     return res.json() if res.text else None
+
+
+def _track_use(resource_id: str) -> None:
+    """Best-effort usage ping so the action shows on the activity timeline and
+    bumps installs (spec §7). Silent on any failure — never blocks the command."""
+    t = token()
+    if not t:
+        return
+    try:
+        httpx.post(
+            f"{api_url()}/api/resources/{resource_id}/use",
+            headers={"Authorization": f"Bearer {t}", "X-SkillShare-Client": "cli"},
+            timeout=10,
+        )
+    except httpx.HTTPError:
+        pass
 
 
 def upload_file(path: str, kind: str) -> dict:
@@ -219,6 +237,15 @@ def cmd_whoami(_args) -> None:
     u = request("GET", "/api/auth/me")
     print(f"{BOLD}{u['display_name']}{RESET} (@{u['username']}) — {u['email']}")
     print(f"{DIM}publisher: {'yes' if u['is_publisher'] else 'no'} · api: {api_url()}{RESET}")
+    # Plan + MCP entitlement (spec §2), so you know your tier and limits.
+    try:
+        ent = request("GET", "/api/auth/me/entitlements") or {}
+        quota = ent.get("publisher_resource_quota")
+        quota_str = "unlimited" if quota is None else f"{ent.get('publisher_resource_used', 0)}/{quota}"
+        mcp = "included" if ent.get("mcp_included") else "not included"
+        print(f"{DIM}plan: {ent.get('plan_name', ent.get('plan', 'Free'))} · published: {quota_str} · MCP: {mcp}{RESET}")
+    except SystemExit:
+        pass
     # Surface the inbox so you notice when teammates add skills/notes/MCP.
     try:
         cnt = (request("GET", "/api/notifications/unread_count") or {}).get("count", 0)
@@ -439,6 +466,7 @@ def cmd_use(args) -> None:
         section = attachments_md(r)
         sys.stdout.write(body + (section or ""))
     sys.stdout.write("\n")
+    _track_use(args.id)
 
 
 def cmd_pull(args) -> None:
@@ -468,6 +496,7 @@ def cmd_pull(args) -> None:
     else:
         (target / f"{slug}.md").write_text((r.get("content_md") or "") + section)
         print(f"wrote {target / (slug + '.md')}")
+    _track_use(args.id)
 
 
 CLAUDE_SKILLS_DIR = Path("~/.claude/skills").expanduser()
@@ -500,6 +529,7 @@ def cmd_install(args) -> None:
         dest = target / f"{slug}.md"
         dest.write_text(r.get("content_md") or "")
     print(f"installed {BOLD}{r['title']}{RESET} → {dest}")
+    _track_use(args.id)
     _invalidate_status_cache()  # the install gap just shrank — reflect it now
     if getattr(args, "notification", None):
         try:
