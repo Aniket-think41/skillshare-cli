@@ -703,7 +703,12 @@ def cmd_org_logo(args) -> None:
 
 def cmd_publish(args) -> None:
     r = request("POST", f"/api/resources/{args.id}/publish")
-    print(f"🌐 published {BOLD}{r['title']}{RESET} to the public marketplace")
+    # Personal (publisher) content goes live immediately; org content is queued
+    # for an org admin's review first.
+    if r.get("approval_status") == "pending":
+        print(f"⏳ submitted {BOLD}{r['title']}{RESET} for review — it goes live once an admin approves it")
+    else:
+        print(f"🌐 published {BOLD}{r['title']}{RESET} to the public marketplace")
 
 
 def cmd_import(args) -> None:
